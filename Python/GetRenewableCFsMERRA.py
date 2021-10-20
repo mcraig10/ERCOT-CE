@@ -8,19 +8,25 @@ import numpy as np
 from netCDF4 import Dataset
 
 #Output: dfs of wind and solar generation (8760 dt rows, arbitrary cols)
-def getREGen(genFleet,tgtTz,reYear):
-    #Isolate wind & solar units - TO DO: UPDATE ONCE CONVERT GENERATORS TO DF
+def getREGen(genFleet,tgtTz,reYear,currYear):
+    #Isolate wind & solar units
     windUnits,solarUnits = getREInFleet('Wind',genFleet),getREInFleet('Solar',genFleet)
     #Get list of wind / solar sites in region
     lats,lons,cf = loadMerraData(reYear)
     #Match to CFs
     get_cf_index(windUnits,lats,lons),get_cf_index(solarUnits,lats,lons)
-    #Get hourly generation (8760 x n array, n = num generators)
-    windGen = get_hourly_RE_impl(windUnits,cf['wind'],reYear)
-    solarGen = get_hourly_RE_impl(solarUnits,cf['solar'],reYear)
+    #Get hourly generation (8760 x n df, n = num generators). Use given met year data but set dt index to currYear.
+    windGen = get_hourly_RE_impl(windUnits,cf['wind'],currYear)
+    solarGen = get_hourly_RE_impl(solarUnits,cf['solar'],currYear)
     #Shift into right tz
-    windGen,solarGen = shiftTz(windGen,tgtTz,reYear,'wind'),shiftTz(solarGen,tgtTz,reYear,'solar')
-    return windGen,solarGen
+    windGen,solarGen = shiftTz(windGen,tgtTz,currYear,'wind'),shiftTz(solarGen,tgtTz,currYear,'solar')
+    #Combine by region and fill in missing regions with zeros
+    windGenByRegion = windGen.groupby(level='region',axis=1).sum()
+    solarGenByRegion = solarGen.groupby(level='region',axis=1).sum()
+    for genByRegion in [windGenByRegion,solarGenByRegion]:
+        regionsNoGen = [r for r in genFleet['region'].unique() if r not in genByRegion.columns]
+        for r in regionsNoGen: genByRegion[r] = 0
+    return windGen,solarGen,windGenByRegion,solarGenByRegion
 
 def getREInFleet(reType,genFleet):
     reUnits = genFleet.loc[genFleet['FuelType']==reType]
@@ -81,16 +87,17 @@ def get_hourly_RE_impl(RE_generators,cf,yr):
     yr = str(yr)
     idx = pd.date_range('1/1/'+yr + ' 0:00','12/31/' + yr + ' 23:00',freq='H')
     idx = idx.drop(idx[(idx.month==2) & (idx.day ==29)])
-    return pd.DataFrame(RE_capacity,index=idx,columns=RE_generators['GAMS Symbol'].values)
+    reGen = pd.DataFrame(RE_capacity,index=idx,columns=[RE_generators['GAMS Symbol'].values,RE_generators['region'].values])
+    reGen.columns.names = ['GAMS Symbol','region']
+    return reGen
 
 #shift tz (MERRA in UTC)
-def shiftTz(reGen,tz,reYear,reType):
+def shiftTz(reGen,tz,yr,reType):
     origIdx = reGen.index
-    tzOffsetDict = {'CST': -6}
+    tzOffsetDict = {'CST': -6,'EST': -5}
     reGen.index = reGen.index.shift(tzOffsetDict[tz],freq='H')
-    reGen = reGen[reGen.index.year==reYear]
+    reGen = reGen[reGen.index.year==yr]
     reGen = reGen.append([reGen.iloc[-1]]*abs(tzOffsetDict[tz]),ignore_index=True)
     if reType=='solar': reGen.iloc[-5:] = 0 #set nighttime hours to 0
     reGen.index=origIdx
     return reGen
-

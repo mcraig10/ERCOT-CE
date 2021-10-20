@@ -6,19 +6,19 @@ import os, pandas as pd
 from AuxFuncs import *
 from SetupGeneratorFleet import *
 
-def getNewTechs(regElig,regCostFrac,currYear,incITC,stoInCE,seasStoInCE,fuelPrices,
-                incDACS,incNuc,onlyNSPSUnits=True,allowCoalWithoutCCS=False,firstYearForCCS=2030):
+def getNewTechs(regElig,regCostFrac,currYear,incITC,stoInCE,seasStoInCE,fuelPrices,yearIncDACS,
+                incNuc,transRegions,contFlexInelig,onlyNSPSUnits=True,allowCoalWithoutCCS=False,firstYearForCCS=2030):
     #Read in new techs and add parameters
     newTechsCE = pd.read_excel(os.path.join('Data','NewPlantData','NewTechFramework.xlsx'))
     newTechsCE = inputValuesForCurrentYear(newTechsCE,'Data\\NewPlantData',currYear)
     newTechsCE = addUnitCommitmentParameters(newTechsCE,'PhorumUCParameters.csv') 
     newTechsCE = addUnitCommitmentParameters(newTechsCE,'StorageUCParameters.csv')
     newTechsCE = addFuelPrices(newTechsCE,currYear,fuelPrices)
-    if incDACS: newTechsCE = addDACS(newTechsCE,fuelPrices,currYear)
+    if currYear >= yearIncDACS: newTechsCE = addDACS(newTechsCE,fuelPrices,currYear)
     newTechsCE = addRandomOpCostAdder(newTechsCE)
     newTechsCE = calcOpCost(newTechsCE)
     newTechsCE = addRegResCostAndElig(newTechsCE,regElig,regCostFrac)
-    newTechsCE = addReserveEligibility(newTechsCE)
+    newTechsCE = addReserveEligibility(newTechsCE,contFlexInelig)
     #Discount costs
     for c,l in zip(['CAPEX(2012$/MW)','FOM(2012$/MW/yr)'],['occ','fom']):
         newTechsCE[c] = convertCostToTgtYr(l,newTechsCE[c])
@@ -29,8 +29,9 @@ def getNewTechs(regElig,regCostFrac,currYear,incITC,stoInCE,seasStoInCE,fuelPric
     if not seasStoInCE: newTechsCE = newTechsCE.loc[newTechsCE['PlantType'] != 'Hydrogen']
     if not incNuc: newTechsCE = newTechsCE.loc[newTechsCE['PlantType'] != 'Nuclear']
     if currYear < firstYearForCCS: newTechsCE = newTechsCE.loc[~newTechsCE['PlantType'].str.contains('CCS')]
+    #Assign tech options to each region
+    newTechsCE = repeatNonRETechOptionsForEachRegion(newTechsCE,transRegions)
     newTechsCE.reset_index(inplace=True,drop=True)
-    newTechsCE.to_csv(r'C:\Users\atpha\Documents\Postdocs\Projects\NETs\Model\Python\Data\newTechsCE.txt', header=True, index=False)
     return newTechsCE
 
 def inputValuesForCurrentYear(newTechsCE,newPlantDataDir,currYear):
@@ -66,15 +67,25 @@ def addDACS(newTechsCE,fuelPrices,currYear):
     natGasCost = ngPrice * 5.25/366 * 1000 * 0.947 #$/MWh; 5.25 GJ NG/366 kwh given in Keith; * ng price ($/mmbtu) * conversions
     totalOpCost = natGasCost + vom
     capCost = 779.5*1e6/40.945 #2086000000/40.945 # 779.5*1e6/40.945 #$779.5M buys 0.98Mt co2/yr; @ 366kwh/1 t co2, that is 0.98*366*1e6/8760 = 40.945 MW
-    print('DACS COSTS NOT ADJUSTED TO $2012')
     #Add row to new techs df
     newRow = {'PlantType':['DAC'],'DataSource':['handCalc'],'FuelType':['DAC'],'Capacity (MW)':[dacsCap],
         'Heat Rate (Btu/kWh)':[dacsHR],'CAPEX(2012$/MW)':[-capCost],'FOM(2012$/MW/yr)':[0],'VOM(2012$/MWh)':[-totalOpCost],
         'NSPSCompliant':['Yes'],'CO2EmRate(lb/MMBtu)':[dacsNetEmsRate],'Lifetime(years)':[15],
-        'FuelPrice($/MMBtu)':[0],'RampRate(MW/hr)':[abs(dacsCap)]}
+        'FuelPrice($/MMBtu)':[0],'RampRate(MW/hr)':[abs(dacsCap)],'MinLoad(MWh)':0,'MinDownTime(hrs)':0,'StartCost($)':0}
     newTechsCE = pd.concat([newTechsCE,pd.DataFrame(newRow)])
     newTechsCE.reset_index(drop=True,inplace=True)
     return newTechsCE
+
+#For each non-wind & non-solar tech option, repeat per region. (New W&S use lat/long coords later.)
+def repeatNonRETechOptionsForEachRegion(newTechsCE,transRegions):
+    newTechsRE = newTechsCE.loc[newTechsCE['PlantType'].isin(['Wind','Solar PV'])].copy()
+    newTechsNotRE = newTechsCE.loc[~newTechsCE.index.isin(newTechsRE.index)].copy()
+    l = [newTechsRE]
+    for r in transRegions:
+        regionTechs = newTechsNotRE.loc[~newTechsNotRE['PlantType'].isin(['Wind','Solar PV'])].copy()
+        regionTechs['region'] = r
+        l.append(regionTechs)
+    return pd.concat(l)
 
 ########## OLD ######################
 #Account for ITC in RE cap costs

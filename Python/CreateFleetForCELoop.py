@@ -10,9 +10,8 @@ from AuxFuncs import *
 ################## CREATE FLEET FOR CURRENT CE LOOP ############################
 #Inputs: gen fleet (2d list), current CE year, list of units retired each year (2d list)
 #Outputs: gen fleet w/ retired units removed (2d list)
-def createFleetForCurrentCELoop(genFleet,currYear,capacExpRetiredUnitsByAge,retireByAge):
-    if retireByAge:
-        genFleet = markAndSaveRetiredUnitsFromAge(genFleet,currYear,capacExpRetiredUnitsByAge)
+def createFleetForCurrentCELoop(genFleet,currYear,retireByAge):
+    if retireByAge: genFleet = markAndSaveRetiredUnitsFromAge(genFleet,currYear)
     genFleetForCE = getOnlineGenFleet(genFleet,currYear)
     return genFleet,genFleetForCE
 
@@ -22,11 +21,9 @@ def getOnlineGenFleet(genFleet,currYear):
     genFleetForCE = genFleetForCE.loc[genFleetForCE['Retirement Year']>currYear]
     genFleetForCE = genFleetForCE.loc[genFleetForCE['Retired']==False]
     return genFleetForCE
-################################################################################
 
-#################### RETIRE UNITS BY AGE #######################################
 #Marks units that retire in gen fleet and saves them in list
-def markAndSaveRetiredUnitsFromAge(genFleet,currYear,capacExpRetiredUnitsByAge,):
+def markAndSaveRetiredUnitsFromAge(genFleet,currYear):
     lifetimes = importPlantTypeLifetimes()
     lifetimes = genFleet['PlantType'].map(lifetimes)
     retirements = (lifetimes + genFleet['On Line Year']) < currYear
@@ -36,7 +33,7 @@ def markAndSaveRetiredUnitsFromAge(genFleet,currYear,capacExpRetiredUnitsByAge,)
     genFleet.loc[retirements.index,'Retired'] = True
     retirements = (genFleet.loc[retirements.index,'ORIS Plant Code'].astype(str) + "+" +     
                     genFleet.loc[retirements.index,'Unit ID']).tolist()
-    capacExpRetiredUnitsByAge.append(['UnitsRetiredByAge' + str(currYear)] + retirements)
+    # capacExpRetiredUnitsByAge.append(['UnitsRetiredByAge' + str(currYear)] + retirements)
     return genFleet
 
 #Import lifetimes for each plant type
