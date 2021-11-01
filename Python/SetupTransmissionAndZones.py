@@ -99,16 +99,30 @@ def checkZones(genFleet,transRegions):
 
 ##########################
 def getTransmissionData(interconn,transRegions,pRegionShapes):
-    limits,costs,dists = importTransmissionData(interconn,transRegions,pRegionShapes)
-    dists,limits,costs = expandTransmissionData(limits,costs,dists)
+    #Import raw transmission data from REEDS
+    limits,costs,dists = importTransmissionData(interconn)
+    #Filter data to p-regions of interest and, if using larger regions, combine p-region data 
+    limits,costs,dists = filterOrCombineTransmissionData(interconn,limits,costs,dists,transRegions,pRegionShapes)
+    print(dists)
+    print(limits)
+    print(costs)
+    dists,limits,costs = expandTransmissionData(interconn,limits,costs,dists)
     #Should have distances, costs, and limits for all possible lines; if not, need to align (likely add zero existing capacities). 
+    print(dists)
+    print(limits)
+    print(costs)
     assert((dists.shape[0] == limits.shape[0]) and (dists.shape[0] == costs.shape[0]))
+    #Add GAMS symbols
+    for df in [dists,limits,costs]: df['GAMS Symbol'] = df['r'] + df['rr']
     return limits,costs,dists
 
-def importTransmissionData(interconn,transRegions,pRegionShapes):
-    #Read in data
+def importTransmissionData(interconn):
     limits = pd.read_csv(os.path.join('Data','REEDS','transmission_capacity_initial.csv'),header=0)
     costs = pd.read_csv(os.path.join('Data','REEDS','transmission_line_cost.csv'),names=['r','cost($/mw-mile)'])
+    dists = pd.read_csv(os.path.join('Data','REEDS','transmission_distance.csv'),header=0)
+    return limits,costs,dists
+
+def filterOrCombineTransmissionData(interconn,limits,costs,dists,transRegions,pRegionShapes):
     #Filter dfs to only include lines that start/end within p-regions of interest
     pRegions = getAllPRegions(transRegions)
     limits = limits.loc[limits['r'].isin(pRegions)]
@@ -116,46 +130,55 @@ def importTransmissionData(interconn,transRegions,pRegionShapes):
     costs = costs.loc[costs['r'].isin(pRegions)]
     #If have multi-p-region zones, aggregate transmission data (median of costs & distances; sum of initial capacity)
     if interconn == 'EI':
+        #Get total inter-regional transmission limits per REEDS data
+        limits,costs = getInterregionalLimitsAndCostsEI(transRegions,limits,costs)     
         #Get regional (instead of p-region) centroids for distance calculations
         regionShapes = pRegionShapes.dissolve(by='region')
         centroids = regionShapes.centroid
-        #Map p-regions to zones for aggregation
-        transRegionsReversed = reverseTransRegions(transRegions)
-        limits['rZone'] = limits['r'].map(transRegionsReversed)
-        limits['rrZone'] = limits['rr'].map(transRegionsReversed)
-        limits = limits.loc[limits['rZone']!=limits['rrZone']]
-        totalLimits,medianCosts,dists = list(),list(),list()
-        #For each pair of regions, get inter-regional costs, distances, capacity
-        for r in transRegions:
-            for rr in transRegions:
-                if r != rr:
-                    #Get inter-regional lines (if any)
-                    interZoneLimits = limits.loc[(limits['rZone']==r) & (limits['rrZone']==rr)]
-                    if interZoneLimits.shape[0]>0:
-                        #Get limits as sum of interregional capacity
-                        totalLimitAC,totalLimitDC = interZoneLimits['AC'].sum(),interZoneLimits['DC'].sum()
-                        totalLimits.append(pd.Series({'r':r,'rr':rr,'AC':totalLimitAC,'DC':totalLimitDC}))
-                        #Get costs for p-regions in both BAs, take median by BA, then average across BAs
-                        interZonePRegions = interZoneLimits['r'].unique()
-                        interZoneCostsR = costs.loc[costs['r'].isin(interZonePRegions)]
-                        interZonePRegions = interZoneLimits['rr'].unique()
-                        interZoneCostsRR = costs.loc[costs['r'].isin(interZonePRegions)]
-                        medianR = np.median(interZoneCostsR['cost($/mw-mile)'])
-                        medianRR = np.median(interZoneCostsRR['cost($/mw-mile)'])
-                        medianCosts.append(pd.Series({'r':r,'rr':rr,'cost($/mw-mile)':((medianR + medianRR)/2)}))
-                        #Get distance b/wn region centroids
-                        centR,centRR = centroids[r],centroids[rr]
-                        dist = haversine(centR,centRR)
-                        dists.append(pd.Series({'r':r,'rr':rr,'dist(mile)':haversine(centR,centRR)}))
-        limits = pd.concat(totalLimits,axis=1).T
-        costs = pd.concat(medianCosts,axis=1).T
+        #For each unique bidirectional regional pair, get distances. 
+        dists = list()
+        for r,rr in zip(limits['r'],limits['rr']):
+            #Get distance b/wn region centroids
+            centR,centRR = centroids[r],centroids[rr]
+            dist = haversine(centR,centRR)
+            dists.append(pd.Series({'r':r,'rr':rr,'dist(mile)':haversine(centR,centRR)}))
         dists = pd.concat(dists,axis=1).T
-    else: #load distances if not aggregating data
-        dists = pd.read_csv(os.path.join('Data','REEDS','transmission_distance.csv'),header=0)
+    else: #load distances if not aggregating data. All pairwise combinations of p-regions included in data. 
         dists = dists.loc[dists['r'].isin(pRegions)]
         dists = dists.loc[dists['rr'].isin(pRegions)]
     return limits,costs,dists
 
+# REEDS transmission limits are only reported once for each unique p-region pair. 
+# E.g., p87 to p88 has 1 value that is NOT repeated for p88 to p87. So need to combine 
+# limits between regions independent of direction. 
+def getInterregionalLimitsAndCostsEI(transRegions,limits,costs):
+    #Map p-regions to zones for aggregation
+    transRegionsReversed = reverseTransRegions(transRegions)
+    limits['rZone'] = limits['r'].map(transRegionsReversed)
+    limits['rrZone'] = limits['rr'].map(transRegionsReversed)
+    limits = limits.loc[limits['rZone']!=limits['rrZone']]
+    #For each pair of regions, get inter-regional capacity
+    totalLimits,medianCosts,finishedRegions = list(),list(),list()
+    for r in transRegions:
+        for rr in transRegions:
+            if r != rr and (r,rr) not in finishedRegions:
+                #Get inter-regional lines (if any) for both possible unidirectional routes
+                interZoneLimitsRtoRR = limits.loc[(limits['rZone']==r) & (limits['rrZone']==rr)]
+                interZoneLimitsRRtoR = limits.loc[(limits['rZone']==rr) & (limits['rrZone']==r)]
+                interZoneLimits = pd.concat([interZoneLimitsRtoRR,interZoneLimitsRRtoR])
+                if interZoneLimits.shape[0]>0:
+                    #Get limits as sum of interregional capacity
+                    totalLimitAC,totalLimitDC = interZoneLimits['AC'].sum(),interZoneLimits['DC'].sum()
+                    totalLimits.append(pd.Series({'r':r,'rr':rr,'AC':totalLimitAC,'DC':totalLimitDC}))
+                    finishedRegions += [(r,rr),(rr,r)]
+                    #Get bidrectional inter-regional costs as median of costs between each pair of p-regions
+                    interZoneCostsR = costs.loc[costs['r'].isin(interZoneLimits['r'].unique())]
+                    interZoneCostsRR = costs.loc[costs['r'].isin(interZoneLimits['rr'].unique())]
+                    medianR,medianRR = np.median(interZoneCostsR['cost($/mw-mile)']),np.median(interZoneCostsRR['cost($/mw-mile)'])
+                    medianCosts.append(pd.Series({'r':r,'rr':rr,'cost($/mw-mile)':((medianR + medianRR)/2)}))
+    return pd.concat(totalLimits,axis=1).T,pd.concat(medianCosts,axis=1).T
+
+#Calculate distance between two coordinates using haversine formula.
 def haversine(centR,centRR,kmToMi=0.621371):
     latR,lonR = np.radians(centR.y),np.radians(centR.x)
     latRR,lonRR = np.radians(centRR.y),np.radians(centRR.x)
@@ -166,19 +189,24 @@ def haversine(centR,centRR,kmToMi=0.621371):
 
 #Expand transmission data by (1) reversing source-sink line limits & (2) mapping costs to lines (not regions)
 #& (3) add GAMS symbols as r + rr. 
-def expandTransmissionData(limits,costs,dists):
+def expandTransmissionData(interconn,limits,costs,dists):
     #Reverse source-sink limits
-    limitsReversed = limits.rename(columns={'r':'rr','rr':'r'})
-    limits = pd.concat([limits,limitsReversed])
-    limits.reset_index(inplace=True,drop=True)
-    #Map costs to lines
-    costs = costs.set_index(costs['r'].values).to_dict()['cost($/mw-mile)']
-    costsAllLines = dists[['r','rr']].copy()
-    costsAllLines['rCost'],costsAllLines['rrCost'] = costsAllLines['r'].map(costs),costsAllLines['rr'].map(costs)
-    costsAllLines['Line Cost ($/mw-mile)'] = (costsAllLines['rCost'] + costsAllLines['rrCost'])/2
-    #Add GAMS symbols
-    for df in [dists,limits,costsAllLines]: df['GAMS Symbol'] = df['r'] + df['rr']
+    limits = addReversedLines(limits)
+    if interconn == 'EI': #reverse dist & cost limits
+        costsAllLines,dists = addReversedLines(costs),addReversedLines(dists)
+    else: #map costs to lines using dists df, which has all pairwise combos
+        costs = costs.set_index(costs['r'].values).to_dict()['cost($/mw-mile)']
+        costsAllLines = dists[['r','rr']].copy()
+        costsAllLines['rCost'],costsAllLines['rrCost'] = costsAllLines['r'].map(costs),costsAllLines['rr'].map(costs)
+        costsAllLines['Line Cost ($/mw-mile)'] = (costsAllLines['rCost'] + costsAllLines['rrCost'])/2
     return dists,limits,costsAllLines
+
+#Reverse all lines and add to df (e.g., df w/ r:p60,rr:p43 now has r:p60,rr:p43 and r:p43,rr:p60).
+def addReversedLines(df):
+    dfReversed = df.rename(columns={'r':'rr','rr':'r'})
+    df = pd.concat([df,dfReversed])
+    df.reset_index(inplace=True,drop=True)
+    return df
 ################################################################################
 
 #Unused distance code in getTransmissionData
